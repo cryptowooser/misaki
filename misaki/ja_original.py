@@ -39,7 +39,7 @@ chr(12479): 'ta', #タ
 chr(12480): 'da', #ダ
 chr(12481): 'ʨi', #チ
 chr(12482): 'ʥi', #ヂ
-# chr(12483): '#', #ッ # This character is handled contextually.
+# chr(12483): '#', #ッ
 chr(12484): 'ʦu', #ツ
 chr(12485): 'zu', #ヅ
 chr(12486): 'te', #テ
@@ -225,9 +225,7 @@ for k, v in M2P.items():
     for old, new in P2R:
         v = v.replace(old, new)
 
-# The small tsu 'ッ' is mapped to a glottal stop 'ʔ' as a fallback,
-# but is primarily handled in the __call__ method to produce a geminated
-# consonant based on the following mora.
+# TODO
 M2P['ッ'] = 'ʔ'
 M2P['ン'] = 'ɴ'
 M2P['ー'] = 'ː'
@@ -271,74 +269,34 @@ class JAG2P:
                 moras.append(k)
         return moras
 
-    def _merge_chained_tokens(self, raw_tokens: List[dict]) -> List[dict]:
-        """Merges tokens that are phonologically chained together."""
-        if not raw_tokens:
-            return []
-        
-        merged = [raw_tokens[0]]
-        for i in range(1, len(raw_tokens)):
-            curr = raw_tokens[i]
-            # If the current token is chained to the previous one, merge them.
-            if curr['chain_flag'] == 1 and merged:
-                prev = merged[-1]
-                prev['string'] += curr['string']
-                prev['pron'] += curr['pron']
-                prev['mora_size'] += curr['mora_size']
-                # Accent/pitch logic might need more sophisticated merging,
-                # but for now, we prioritize correct phoneme generation.
-                # The accent of the base word is usually kept.
-            else:
-                merged.append(curr)
-        return merged
-
     def __call__(self, text) -> Tuple[str, Optional[List[MToken]]]:
         if self.cutlet:
             return self.cutlet(text)
-        
-        raw_tokens = list(pyopenjtalk.run_frontend(text))
-        logical_words = self._merge_chained_tokens(raw_tokens)
-
         tokens = []
         last_a, last_p = 0, ''
         acc, mcount = None, 0
-
-        for word in logical_words:
+        for word in pyopenjtalk.run_frontend(text):
             pron, mora_size = word['pron'], word['mora_size']
             moras = []
             if mora_size > 0:
                 moras = JAG2P.pron2moras(pron)
-                # The assertion may fail if the mora calculation logic of pyopenjtalk
-                # for chained words differs slightly, so we comment it out for robustness.
-                # assert len(moras) == mora_size or len(moras) + (1 if moras[0] == 'ー' else 0) == mora_size, (moras, mora_size, pron)
-
-            # chain_flag logic now applies to the logical (merged) word unit.
-            # We can simplify this or re-evaluate if needed, but for now we focus on phonemes.
-            chain_flag = mora_size > 0 and tokens and tokens[-1]._.mora_size > 0 and (word.get('chain_flag') == 1 or moras[0] == 'ー')
-            
+                assert len(moras) == mora_size or len(moras) + (1 if moras[0] == 'ー' else 0) == mora_size, (moras, mora_size)
+            chain_flag = mora_size > 0 and tokens and tokens[-1]._.mora_size > 0 and (word['chain_flag'] == 1 or moras[0] == 'ー')
             if not chain_flag:
                 acc, mcount = None, 0
             acc = word['acc'] if acc is None else acc
             accents = []
-            
-            temp_mcount = 0
             for _ in moras:
-                temp_mcount += 1
+                mcount += 1
                 if acc == 0:
-                    # Heiban (flat accent)
-                    accents.append(0 if temp_mcount == 1 else (1 if last_a == 0 else 2))
-                elif acc == temp_mcount:
-                    # Odaka (tail-high)
+                    accents.append(0 if mcount == 1 else (1 if last_a == 0 else 2))
+                elif acc == mcount:
                     accents.append(3)
-                elif 1 < temp_mcount < acc:
-                    # Nakadaka (middle-high)
+                elif 1 < mcount < acc:
                     accents.append(1 if last_a == 0 else 2)
                 else:
-                    # Atamadaka (head-high) or other low moras
                     accents.append(0)
                 last_a = accents[-1]
-            mcount += temp_mcount
-
             assert len(moras) == len(accents)
             surface = word['string']
             if surface in PUNCT_MAP:
@@ -347,25 +305,21 @@ class JAG2P:
             if moras:
                 phonemes, pitch = '', ''
                 for i, (m, a) in enumerate(zip(moras, accents)):
-                    ps = ''
-                    if m == 'ッ':
-                        if i + 1 < len(moras):
-                            next_mora = moras[i+1]
-                            next_ps_lookup = M2P.get(next_mora)
-                            
-                            if next_ps_lookup and len(next_ps_lookup) > 0 and next_ps_lookup[0] in CONSONANTS:
-                                # Prepend the first consonant of the next phoneme
-                                ps = next_ps_lookup[0]
-                            else:
-                                ps = M2P['ッ']
-                        else:
-                            ps = M2P['ッ']
-                    else:
-                        ps = M2P[m]
-                    
+                    ps = M2P[m] #last_p if m == 'ー' else M2P[m]
                     phonemes += ps
                     pitch += ('_' if a == 0 else ('^' if a == 3 else '-')) * len(ps)
-
+                    # if a in (0, 2):# or all(v not in ps for v in VOWELS):
+                    #     phonemes += ps
+                    # elif a == 1:
+                    #     phonemes += '↑' + ps
+                    # else:
+                    #     assert a == 3, a
+                    #     if i > 0 and accents[i-1] == 0:
+                    #         phonemes += '↑'
+                    #     elif i == 0 and chain_flag and tokens[-1]._.accents[-1] == 0:
+                    #         phonemes += '↑'
+                    #     phonemes += ps + '↓'
+                    # last_p = ps[-1:]
             elif surface and all(s in PUNCT_VALUES for s in surface):
                 phonemes = surface
                 if surface[-1] in PUNCT_STOPS:
@@ -382,7 +336,7 @@ class JAG2P:
                 whitespace=whitespace, phonemes=phonemes,
                 _=MToken.Underscore(
                     pron=pron, acc=word['acc'], mora_size=mora_size,
-                    chain_flag=word.get('chain_flag', 0), moras=moras, accents=accents, pitch=pitch
+                    chain_flag=chain_flag, moras=moras, accents=accents, pitch=pitch
                 )
             ))
         result, pitch = '', ''
@@ -391,7 +345,7 @@ class JAG2P:
                 result += self.unk + tk.whitespace
                 pitch += 'j' * len(self.unk + tk.whitespace)
                 continue
-            if tk._.mora_size and not tk._.chain_flag and result and result[-1] in TAILS and not (tk._.moras and tk._.moras[0] == 'ン'):
+            if tk._.mora_size and not tk._.chain_flag and result and result[-1] in TAILS and not tk._.moras[0] == 'ン':
                 result += ' '
                 pitch += 'j'
             result += tk.phonemes + tk.whitespace
